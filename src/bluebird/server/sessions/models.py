@@ -3,23 +3,29 @@
 #
 # Author Jan Löser <jloeser@suse.de>
 # Published under the GNU Public Licence 2
-import logging
 import base64
+import logging
+from datetime import datetime
+from datetime import timedelta
 from hashlib import md5
 from time import time
-from datetime import datetime, timedelta
+
+from bluebird.server.sessions.exceptions import NoAuthModule
+from bluebird.server.sessions.exceptions import NoValidSession
+from bluebird.server.sessions.exceptions import SessionLimitExceeded
 
 logger = logging.getLogger('session')
 
+
 class BluebirdAuthentication():
 
-    def is_authenticated(self, username, password):
+    def authenticate(self, username, password):
         pass
+
 
 class Session():
 
-    __instance = None
-    __initialized = False
+    __shared_state = {}
     # according to SessionService.1.0.0, timeout mus be between 30 and 86400
     __session_timeout_min = 30
     __sessions = {}
@@ -27,18 +33,8 @@ class Session():
     __id = 0
     __authentication_instance = None
 
-
-    def __new__(cls, *args, **kwargs):
-        if not cls.__instance:
-            cls.__instance = super(Session, cls).__new__(
-                    cls, *args, **kwargs
-            )
-        return cls.__instance
-
     def __init__(self):
-        if not Session.__initialized:
-            logger.debug(" * Sessions initialized.")
-            Session.__initialized = True
+        self.__dict__ = Session.__shared_state
 
     def get_timeout():
         return Session.__session_timeout_min
@@ -51,7 +47,9 @@ class Session():
             if data['X-AUTH'] == xauth:
                 current = datetime.now()
                 timestamp = datetime.fromtimestamp(data['TIME'])
-                if (current - timestamp) < timedelta(minutes=self.__session_timeout_min):
+                if (current - timestamp) <\
+                        timedelta(minutes=self.__session_timeout_min):
+
                     logger.debug("'{}' is valid.".format(xauth))
                     data['TIME'] = time()
                     data['USERNAME'] = data['USERNAME']
@@ -67,29 +65,28 @@ class Session():
 
     def check_basic_auth(self, basic_auth):
         if not self.__authentication_instance:
-            logger.error("No authentication module is set!")
-            return False
+            raise NoAuthModule
 
         prefix, credential = basic_auth.split(' ')
         if prefix == 'Basic':
             credential = base64.b64decode(credential).decode('utf-8')
             username, password = credential.split(':')
-            if self.__authentication_instance.is_authenticated(
+            if self.__authentication_instance.authenticate(
                     username, password):
                 result = {
                         'USERNAME': username,
                         'PASSWORD': password
                 }
                 return result
-        return False
+        raise NoValidSession
 
     def create(self, username, password):
         if not self.__authentication_instance:
-            logger.error("No authentication module is set!")
-            return ('BluebirdServer', 'NoAuthenticationModule', 500)
+            raise NoAuthModule
 
-        # check if a session is active for username and return same session
-        if self.__authentication_instance.is_authenticated(username, password):
+        if self.__authentication_instance.authenticate(username, password):
+
+            # check if a session is active for username and return same session
             for id, session in self.__sessions.items():
                 if session['USERNAME'] == username:
                     logger.debug('Session already exists!')
@@ -98,6 +95,7 @@ class Session():
                             'USERNAME': session['USERNAME'],
                             'X-AUTH': session['X-AUTH']
                     }
+
             # create new session if limit isn't reached
             if self.__id < self.__limit:
                 id = md5(str.encode(str(self.__id)))
@@ -121,13 +119,14 @@ class Session():
                 self.__id += 1
                 return result
             else:
-                return ('Base', 'SessionLimitExceeded', 403)
-        return False
+                raise SessionLimitExceeded
+        else:
+            raise NoValidSession
 
     def delete(self, id):
+        """Delete a session."""
         if id in self.__sessions.keys():
             del self.__sessions[id]
-        return True
 
     def set_authentication_instance(instance):
         """
@@ -135,7 +134,11 @@ class Session():
         BluebirdAuthentication.
         """
         if isinstance(instance, BluebirdAuthentication):
-            Session.__authentication_instance = instance
+            Session.__dict__['_Session__shared_state']\
+                    ['_Session__authentication_instance'] = instance
+        else:
+            raise TypeError
 
-    def get_authentication_name():
-        return Session.__authentication_instance.__class__.__name__
+    def get_authentication_name(self):
+        """Get the name of the authentication instance."""
+        return self.__authentication_instance.__class__.__name__
